@@ -1,0 +1,25 @@
+require("dotenv").config();
+const express=require("express"),session=require("express-session"),bcrypt=require("bcryptjs"),multer=require("multer"),path=require("path"),fs=require("fs"),{v4:uuid}=require("uuid");
+const app=express(),ROOT=__dirname,DATA=path.join(ROOT,"data"),UPLOAD=path.join(ROOT,"uploads"),PUB=path.join(ROOT,"public");
+const UF=path.join(DATA,"users.json"),MF=path.join(DATA,"memories.json");
+fs.mkdirSync(DATA,{recursive:true});fs.mkdirSync(UPLOAD,{recursive:true});
+for(const f of [UF,MF])if(!fs.existsSync(f))fs.writeFileSync(f,"[]");
+const read=f=>{try{return JSON.parse(fs.readFileSync(f,"utf8"))}catch{return[]}},write=(f,d)=>fs.writeFileSync(f,JSON.stringify(d,null,2));
+const clean=u=>({id:u.id,username:u.username,createdAt:u.createdAt});
+const auth=(req,res,next)=>req.session.userId?next():res.status(401).json({error:"Please log in first."});
+const storage=multer.diskStorage({destination:(_r,_f,cb)=>cb(null,UPLOAD),filename:(_r,f,cb)=>cb(null,uuid()+path.extname(f.originalname).toLowerCase())});
+const upload=multer({storage,limits:{fileSize:8*1024*1024},fileFilter:(_r,f,cb)=>/^image\/(jpeg|png|gif|webp)$/.test(f.mimetype)?cb(null,true):cb(new Error("Only JPG, PNG, GIF and WebP images are allowed."))});
+app.use(express.json());app.use(session({secret:process.env.SESSION_SECRET||"dev-secret",resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:"lax",maxAge:7*864e5}}));app.use("/uploads",express.static(UPLOAD));app.use(express.static(PUB));
+
+app.post("/api/register",async(req,res)=>{let username=String(req.body.username||"").trim(),password=String(req.body.password||"");if(username.length<3||username.length>32)return res.status(400).json({error:"Username must be 3–32 characters."});if(password.length<6)return res.status(400).json({error:"Password must be at least 6 characters."});let users=read(UF);if(users.some(u=>u.username.toLowerCase()===username.toLowerCase()))return res.status(409).json({error:"Username already exists."});let u={id:uuid(),username,passwordHash:await bcrypt.hash(password,12),createdAt:new Date().toISOString()};users.push(u);write(UF,users);req.session.userId=u.id;res.status(201).json({user:clean(u)})});
+app.post("/api/login",async(req,res)=>{let username=String(req.body.username||"").trim(),password=String(req.body.password||""),u=read(UF).find(x=>x.username.toLowerCase()===username.toLowerCase());if(!u||!(await bcrypt.compare(password,u.passwordHash)))return res.status(401).json({error:"Invalid username or password."});req.session.userId=u.id;res.json({user:clean(u)})});
+app.post("/api/logout",(req,res)=>req.session.destroy(()=>res.json({ok:true})));
+app.get("/api/me",auth,(req,res)=>{let u=read(UF).find(x=>x.id===req.session.userId);u?res.json({user:clean(u)}):res.status(401).json({error:"Session expired."})});
+app.get("/api/memories",auth,(req,res)=>res.json({memories:read(MF).filter(m=>m.userId===req.session.userId).sort((a,b)=>new Date(b.date)-new Date(a.date))}));
+app.post("/api/memories",auth,upload.single("image"),(req,res)=>{let title=String(req.body.title||"").trim();if(!title)return res.status(400).json({error:"Title is required."});let m={id:uuid(),userId:req.session.userId,title,date:req.body.date||new Date().toISOString().slice(0,10),description:String(req.body.description||""),tags:String(req.body.tags||"").split(",").map(x=>x.trim()).filter(Boolean),color:req.body.color||"#a78bfa",x:Number(req.body.x)||Math.random()*80+10,y:Number(req.body.y)||Math.random()*70+15,image:req.file?"/uploads/"+req.file.filename:null,createdAt:new Date().toISOString()};let a=read(MF);a.push(m);write(MF,a);res.status(201).json({memory:m})});
+app.put("/api/memories/:id",auth,upload.single("image"),(req,res)=>{let a=read(MF),i=a.findIndex(m=>m.id===req.params.id&&m.userId===req.session.userId);if(i<0)return res.status(404).json({error:"Memory not found."});let m=a[i];Object.assign(m,{title:String(req.body.title??m.title).trim(),date:req.body.date||m.date,description:String(req.body.description??m.description),tags:req.body.tags!==undefined?String(req.body.tags).split(",").map(x=>x.trim()).filter(Boolean):m.tags,color:req.body.color||m.color});if(req.file)m.image="/uploads/"+req.file.filename;a[i]=m;write(MF,a);res.json({memory:m})});
+app.delete("/api/memories/:id",auth,(req,res)=>{let a=read(MF),i=a.findIndex(m=>m.id===req.params.id&&m.userId===req.session.userId);if(i<0)return res.status(404).json({error:"Memory not found."});a.splice(i,1);write(MF,a);res.json({ok:true})});
+app.get("/api/tags",auth,(req,res)=>{let c={};read(MF).filter(m=>m.userId===req.session.userId).flatMap(m=>m.tags||[]).forEach(t=>c[t]=(c[t]||0)+1);res.json({tags:Object.entries(c).map(([name,count])=>({name,count}))})});
+app.use((e,_r,res,_n)=>res.status(400).json({error:e.message||"Request failed."}));
+app.get("*",(_r,res)=>res.sendFile(path.join(PUB,"index.html")));
+app.listen(Number(process.env.PORT||5000),()=>console.log("MilkyMemory: http://localhost:"+(process.env.PORT||5000)));
